@@ -15,6 +15,13 @@ fi
 apt-get update
 apt-get install -y curl ca-certificates
 
+# Make sure Zabbly publishes packages for this Ubuntu release before touching apt sources
+if ! curl -fsSI "https://pkgs.zabbly.com/incus/stable/dists/${VERSION_CODENAME}/Release" >/dev/null; then
+  echo "Ubuntu ${VERSION_ID} (${VERSION_CODENAME}) is not supported by the Zabbly Incus repository." >&2
+  echo "Supported releases are listed at https://github.com/zabbly/incus" >&2
+  exit 1
+fi
+
 mkdir -p /etc/apt/keyrings
 curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
 

@@ -12,7 +12,7 @@ It is safe to run more than once.
 
 ## Requirements
 
-- Ubuntu 22.04 (Jammy) or 24.04 (Noble)
+- An Ubuntu release supported by Zabbly, such as 22.04 (Jammy) or 24.04 (Noble). Older releases like 20.04 (Focal) are not supported; the script checks this and stops before changing anything.
 - Root access
 
 ## Usage
