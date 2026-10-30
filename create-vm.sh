@@ -4,7 +4,6 @@ set -euo pipefail
 # ufw translates its output, which is parsed below
 export LC_ALL=C
 
-BRIDGE=lxdbr0
 VM_CREATED=no
 
 die() {
@@ -221,9 +220,20 @@ ask_password() {
   done
 }
 
-BRIDGE_CIDR=$(lxc network get "$BRIDGE" ipv4.address 2>/dev/null || true)
+# The profile names the bridge under "network" or "parent", depending on how it was set up
+BRIDGE=$(lxc profile device get default eth0 network 2>/dev/null || true)
+if [[ -z $BRIDGE ]]; then
+  BRIDGE=$(lxc profile device get default eth0 parent 2>/dev/null || true)
+fi
+if [[ -z $BRIDGE ]]; then
+  lxc network list >&2
+  die "The default profile has no eth0 network device. Has 'lxd init' been run?"
+fi
+
+BRIDGE_CIDR=$(ip -4 -o addr show dev "$BRIDGE" | awk 'NR == 1 {print $4}' || true)
 if [[ ! $BRIDGE_CIDR =~ ^([0-9.]+)/([0-9]+)$ ]]; then
-  die "Bridge $BRIDGE has no IPv4 subnet. Has 'lxd init' been run?"
+  lxc network list >&2
+  die "Bridge $BRIDGE has no IPv4 address on this server."
 fi
 GATEWAY=${BASH_REMATCH[1]}
 PREFIX=${BASH_REMATCH[2]}
