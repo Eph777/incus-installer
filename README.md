@@ -44,3 +44,13 @@ sudo bash incus-installer.sh
 ```
 
 Only Incus is upgraded; other system packages are left untouched. Running containers and VMs keep running during the update.
+
+## Creating a VM
+
+`create-vm.sh` creates a VM on a server running LXD and gives one user SSH access to it, with their own password and without any access to the server:
+
+```bash
+sudo ./create-vm.sh
+```
+
+It asks for the VM's name, user, password, resources, IP and SSH port, and suggests free values. [VM-GUIDE.md](VM-GUIDE.md) explains each step and how to monitor and manage the VMs.

@@ -1,0 +1,298 @@
+# VM guide: create, open to SSH, monitor
+
+How to create a VM on the server and give someone access to it, without giving them access to the server. Follow it once per VM.
+
+These commands are for **LXD 4.0 on Ubuntu 20.04**, which is why ports are forwarded with proxy devices and not `lxc network forward`. After a move to Incus, replace `lxc` with `incus` and `lxdbr0` with `incusbr0`.
+
+To do sections 1 to 5 in one go, run `sudo ./create-vm.sh` on the server. It asks for each value, then gives you the SSH command to hand over. Section 7 onwards still applies to VMs created this way.
+
+Each block says where to run it:
+
+| Label | Machine |
+|---|---|
+| **Server** | The Ubuntu server running LXD, logged in over SSH |
+| **Mac** | Your personal computer |
+| **Inside the VM** | A shell opened with `sudo lxc shell <name>` |
+
+## 1. Check there is room
+
+**Server:**
+
+```bash
+free -h                            # RAM available on the server
+sudo lxc storage info default      # disk space left in the storage pool
+sudo lxc list                      # existing VMs and the IPs already used
+```
+
+Keep the RAM of all VMs added together below what the server has, with some left over for the server itself.
+
+## 2. Choose the values for this VM
+
+Four values must be different for every VM:
+
+| Value | Why it must be unique | Example |
+|---|---|---|
+| Name | Identifies the VM in every command | `vm2` |
+| VM IP | Two VMs can't share an address | `10.158.92.11` |
+| SSH port | One server port can only lead to one VM | `2223` |
+| App ports on the server | Same reason (see section 7) | `5556` |
+
+**Server:** these two commands give you the values to build on.
+
+```bash
+sudo lxc network get lxdbr0 ipv4.address   # your subnet, e.g. 10.158.92.1/24
+ip -br a                                   # the server IP on the main interface
+```
+
+A VM IP keeps the first three numbers of the subnet. Choose a last number from 2 to 254 that `lxc list` doesn't show.
+
+Keep track of what you assign:
+
+| VM | VM IP | SSH port | App ports | RAM | CPU | Disk | User |
+|---|---|---|---|---|---|---|---|
+| vm1 | | 2222 | | | | | |
+| vm2 | | 2223 | | | | | |
+
+## 3. Create and start the VM
+
+**Server:** set the values for this VM. Run this first, and run everything after it in the same terminal.
+
+```bash
+VM=vm2
+VM_USER=bob
+VM_IP=10.158.92.11
+SSH_PORT=2223
+RAM=4GiB
+CPUS=2
+DISK=20GiB
+SERVER_IP=203.0.113.25
+```
+
+**Server:** create the VM. `lxc init` creates it without starting it, so everything can be set up before the first boot and you avoid the stop/start that devices need on this LXD version.
+
+```bash
+sudo lxc init ubuntu:24.04 "$VM" --vm -c limits.memory="$RAM" -c limits.cpu="$CPUS"
+sudo lxc config device override "$VM" root size="$DISK"
+sudo lxc config device override "$VM" eth0 ipv4.address="$VM_IP"
+sudo lxc config device add "$VM" ssh-forward proxy \
+  listen=tcp:"$SERVER_IP":"$SSH_PORT" \
+  connect=tcp:"$VM_IP":22 \
+  nat=true
+sudo lxc start "$VM"
+```
+
+**Server:** wait until the VM has finished booting. This usually takes under a minute. If it never returns, press Ctrl+C and check `sudo lxc info "$VM" --show-log`.
+
+```bash
+until sudo lxc exec "$VM" -- true 2>/dev/null; do sleep 2; done
+sudo lxc exec "$VM" -- cloud-init status --wait
+```
+
+## 4. Create the user and allow password login
+
+**Server:** create the account. It asks you to choose the password, and you can press Enter through the name questions.
+
+```bash
+sudo lxc exec "$VM" -- adduser "$VM_USER"
+```
+
+**Server:** allow password login for this user only. All other accounts stay key-only.
+
+```bash
+sudo lxc exec "$VM" -- sh -c "printf '\nMatch User $VM_USER\n    PasswordAuthentication yes\n' >> /etc/ssh/sshd_config && mkdir -p /run/sshd && sshd -t && systemctl restart ssh"
+```
+
+**Server:** only if this user needs to be admin of the VM. They stay limited to the VM.
+
+```bash
+sudo lxc exec "$VM" -- usermod -aG sudo "$VM_USER"
+```
+
+**Server:** install fail2ban, then check that it's watching SSH.
+
+```bash
+sudo lxc exec "$VM" -- sh -c "apt-get update && apt-get install -y fail2ban"
+sudo lxc exec "$VM" -- fail2ban-client status sshd
+```
+
+## 5. Open the firewall
+
+**Server:** allow forwarded traffic to the VM. The port here is the one **inside the VM** (22), not the server port.
+
+```bash
+sudo ufw route allow proto tcp to "$VM_IP" port 22
+```
+
+**Hosting provider's panel:** if it has a firewall, allow TCP on the server port (`2223` in this example).
+
+## 6. Test, then hand over access
+
+**Server:** test the VM directly. You should get a password prompt.
+
+```bash
+ssh "$VM_USER@$VM_IP"
+```
+
+**Mac:** test from outside, using the real values.
+
+```bash
+ssh -p 2223 bob@203.0.113.25
+```
+
+Give the person that command and their password. Use at least 16 random characters, because this port is open to the whole internet. Tell them that several wrong passwords in a row lock them out for about 10 minutes.
+
+### Your own access (optional)
+
+You can always get in from the server without any setup:
+
+**Server:**
+
+```bash
+sudo lxc shell "$VM"
+```
+
+To connect directly from your Mac, add your key to the VM.
+
+**Mac:** copy your public key.
+
+```bash
+pbcopy < ~/.ssh/id_ed25519.pub
+```
+
+**Server:** paste it in place of `PASTE_YOUR_KEY_HERE`.
+
+```bash
+sudo lxc exec "$VM" -- sh -c '
+  mkdir -p /home/ubuntu/.ssh &&
+  echo "PASTE_YOUR_KEY_HERE" >> /home/ubuntu/.ssh/authorized_keys &&
+  chown -R ubuntu:ubuntu /home/ubuntu/.ssh &&
+  chmod 700 /home/ubuntu/.ssh &&
+  chmod 600 /home/ubuntu/.ssh/authorized_keys'
+```
+
+**Mac:** add one block per VM to `~/.ssh/config`. This assumes the `Host prod` block for the server is already there. After that, `ssh vm2` connects you through the server.
+
+```
+Host vm2
+    HostName 10.158.92.11
+    User ubuntu
+    ProxyJump prod
+```
+
+## 7. Forward an app port (optional)
+
+Do this when the VM runs a website or backend. Two VMs can use the same port inside, but each needs its own port on the server. Here port `5556` on the server leads to port `5555` in the VM.
+
+**Server:** the VM must be stopped to add a device.
+
+```bash
+sudo lxc stop "$VM"
+sudo lxc config device add "$VM" web-5555 proxy \
+  listen=tcp:"$SERVER_IP":5556 \
+  connect=tcp:"$VM_IP":5555 \
+  nat=true
+sudo lxc start "$VM"
+sudo ufw route allow proto tcp to "$VM_IP" port 5555
+```
+
+Allow TCP `5556` in the hosting provider's firewall too. The site is then at `http://<server-ip>:5556/`.
+
+The app must listen on `0.0.0.0`, not `127.0.0.1`. Check with `sudo lxc exec "$VM" -- ss -tlnp`.
+
+## 8. Monitor
+
+**All VMs**, on the **server**:
+
+```bash
+sudo lxc list                 # state and IP of every VM
+sudo lxc list -c ns4mDu       # adds memory, disk and CPU usage
+```
+
+**One VM**, on the **server**:
+
+```bash
+sudo lxc info vm2                         # state, resources and network
+sudo lxc config show vm2                  # RAM, CPU and other settings
+sudo lxc config device show vm2           # disk, IP and forwarded ports
+sudo lxc exec vm2 -- free -h              # RAM seen inside the VM
+sudo lxc exec vm2 -- df -h /              # disk seen inside the VM
+sudo lxc exec vm2 -- uptime               # load and time since boot
+```
+
+**Who is connecting**, on the **server**:
+
+```bash
+sudo lxc exec vm2 -- who                           # logged in right now
+sudo lxc exec vm2 -- last -n 10                    # recent logins
+sudo lxc exec vm2 -- fail2ban-client status sshd   # banned IPs
+```
+
+**The server itself**, on the **server**:
+
+```bash
+free -h
+df -h
+sudo lxc storage info default
+sudo lxc info --resources
+```
+
+## 9. Daily management
+
+All on the **server**:
+
+| Task | Command |
+|---|---|
+| Start, stop, restart | `sudo lxc start vm2`, `sudo lxc stop vm2`, `sudo lxc restart vm2` |
+| Force a stuck VM to stop | `sudo lxc stop vm2 --force` |
+| Open a shell | `sudo lxc shell vm2` |
+| Open the console (leave with Ctrl+a, then q) | `sudo lxc console vm2` |
+| Change the RAM or CPU (stop the VM first) | `sudo lxc config set vm2 limits.memory=8GiB limits.cpu=4` |
+| Grow the disk (it can't shrink) | `sudo lxc config device set vm2 root size=40GiB` |
+| Take a snapshot before a risky change | `sudo lxc snapshot vm2 before-change` |
+| Go back to a snapshot | `sudo lxc restore vm2 before-change` |
+| Reset a user's password | `sudo lxc exec vm2 -- passwd bob` |
+| Unban an IP | `sudo lxc exec vm2 -- fail2ban-client set sshd unbanip <ip>` |
+
+Disk growth usually applies after the next restart.
+
+## 10. Remove access or delete a VM
+
+All on the **server**.
+
+Remove one person, and keep the VM:
+
+```bash
+sudo lxc exec vm2 -- deluser --remove-home bob
+```
+
+Close a forwarded port, and keep the VM:
+
+```bash
+sudo lxc stop vm2
+sudo lxc config device remove vm2 ssh-forward
+sudo lxc start vm2
+```
+
+Delete a VM. **This can't be undone:** its disk and snapshots are gone.
+
+```bash
+sudo lxc delete vm2 --force
+sudo ufw status numbered       # find the VM's rules
+sudo ufw delete <number>       # repeat for each; the numbers shift after each delete
+```
+
+## 11. Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `Connection timed out` from outside | A firewall is blocking the traffic | Redo section 5, including the hosting provider's firewall |
+| `Connection refused` from outside, but `ssh` from the server works | fail2ban banned that IP (bans lift after about 10 minutes) | Run `fail2ban-client status sshd`, then unban the IP |
+| `Connection refused` from the server too | SSH isn't running, or the IP is wrong | Check `sudo lxc list`, then `sudo lxc exec vm2 -- ss -tlnp` for `:22` |
+| `Permission denied` with no password prompt | Password login isn't enabled for this user | Redo the password step in section 4 |
+| `Permission denied` after typing the password | Wrong password | Reset it with `passwd` (section 9) |
+| `Device cannot be added when instance is running` | LXD 4.0 needs the VM stopped | Stop the VM, add the device, start it |
+| `VM agent isn't currently running` | The VM is still booting | Wait 30 seconds and try again |
+| `unknown command "forward"` | LXD 4.0 doesn't have this command | Use a proxy device (section 3) |
+| A website gets `Connection refused` | The app only listens on `127.0.0.1` | Make it listen on `0.0.0.0` |
+
+To see where an SSH connection stops, add `-v`: `ssh -v -p 2223 bob@<server-ip>`.
